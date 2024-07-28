@@ -1,13 +1,23 @@
+from collections import OrderedDict
+
 import torch
 from torch import distributions as dist
 from torch import nn, optim
 import torch.nn.functional as F
+from torchvision import datasets
+import torch.utils.data as data
 import numpy as np
 from math import *
-from models.models import LeNetMadry
-from models import wrn
+
+# from models.models import LeNetMadry
+# from models import wrn
+
+from models.resnet import resnet32
+from models.small_convnet_svhn import SmallConvNetSVHN
+
 from tqdm.auto import tqdm, trange
 from util import dataloaders as dl
+from util.misc import set_seed
 from laplace import kfla
 import laplace.util as lutil
 from util.evaluation import timing, predict
@@ -18,58 +28,158 @@ import traceback
 import lula.model
 import lula.train
 
+from model_utils import *
+
+def remap_sd(old_sd, layer_mapping):
+    # re-map keys in state dict:
+    new_sd = OrderedDict()
+    for old_layer, parameter in old_sd.items():
+
+        if old_layer in layer_mapping:
+            
+            new_layer = layer_mapping[old_layer]
+            
+            new_sd[new_layer] = parameter
+
+        else:
+            new_sd[old_layer] = parameter
+
+    return new_sd
+
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataset', default='CIFAR10', choices=['MNIST', 'CIFAR10', 'SVHN', 'CIFAR100'])
 parser.add_argument('--lenet', default=False, action='store_true')
 parser.add_argument('--base', default='plain', choices=['plain', 'oe'])
 parser.add_argument('--timing', default=False, action='store_true')
+parser.add_argument('--batch_size', default=128, type=int)
+parser.add_argument('--seed', default=0, type=int)
 args = parser.parse_args()
+
+args_dict = vars(args)
+
+for k, v in args_dict.items():
+    print(f'{k}: {v}')
+print()
+    
+set_seed(args.seed)
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 path = './pretrained_models/kfla'
 path += '/oe' if args.base == 'oe' else ''
 if not os.path.exists(path):
     os.makedirs(path)
 
+if args.dataset == 'CIFAR10':
+    print('CIFAR10')
 
-if args.dataset == 'MNIST':
-    train_loader = dl.MNIST(train=True, augm_flag=False)
-    val_loader, test_loader = dl.MNIST(train=False, augm_flag=False, val_size=2000)
-elif args.dataset == 'CIFAR10':
-    train_loader = dl.CIFAR10(train=True, augm_flag=False)
-    val_loader, test_loader = dl.CIFAR10(train=False, augm_flag=False, val_size=2000)
+    _, transform_test = get_preprocessor(args.dataset)
+    
+    dataset = datasets.CIFAR10(root='~/data/CIFAR10', train=True, download=True,
+                               transform=transform_test)
+    
+    dataset_val = datasets.CIFAR10(root='~/data/CIFAR10', train=True, download=False,
+                                   transform=transform_test)
+
+    testset = datasets.CIFAR10(root='~/data/CIFAR10', train=False, download=False,
+                               transform=transform_test)
+
+    # load indices used during our training
+    train_meta_idxs = np.load('trained-base-models/cifar10-resnet32/trainset_meta_idxs.npy')
+    val_idxs = np.load('trained-base-models/cifar10-resnet32/val_idxs.npy')
+
+    trainset = data.Subset(dataset, train_meta_idxs)
+    valset = data.Subset(dataset_val, val_idxs)
+
+    
+    train_loader = torch.utils.data.DataLoader(trainset, batch_size=args.batch_size,
+                                              shuffle=True, num_workers=8)
+
+    val_loader = torch.utils.data.DataLoader(valset, batch_size=args.batch_size,
+                                            shuffle=False, num_workers=8)
+
+    test_loader = torch.utils.data.DataLoader(testset, batch_size=100, shuffle=False,
+                                             num_workers=8)
+
+    meanstd = [ [0.485, 0.456, 0.406], [0.229, 0.224, 0.225] ]
+    
+    
 elif args.dataset == 'SVHN':
-    train_loader = dl.SVHN(train=True, augm_flag=False)
-    val_loader, test_loader = dl.SVHN(train=False, augm_flag=False, val_size=2000)
-elif args.dataset == 'CIFAR100':
-    train_loader = dl.CIFAR100(train=True, augm_flag=False)
-    val_loader, test_loader = dl.CIFAR100(train=False, augm_flag=False, val_size=2000)
 
+    _ , transform_test = get_preprocessor(args.dataset)
+    
+    dataset = datasets.SVHN(root='~/data/SVHN', split='train', download=True,
+                            transform=transform_test)
+    
+    dataset_val = datasets.SVHN(root='~/data/SVHN', split='train', download=True,
+                                transform=transform_test)
+    
+    # load indices used during our training
+    train_meta_idxs = np.load('trained-base-models/svhn-cnn/trainset_meta_idxs.npy')
+    val_idxs = np.load('trained-base-models/svhn-cnn/val_idxs.npy')
 
-targets = torch.cat([y for x, y in test_loader], dim=0).numpy()
-targets_val = torch.cat([y for x, y in val_loader], dim=0).numpy()
+    trainset = data.Subset(dataset, train_meta_idxs)
+    valset = data.Subset(dataset, val_idxs)
+
+    testset = datasets.SVHN(root='~/data/SVHN', split='test', download=True,
+                            transform=transform_test)
+
+    
+    train_loader = torch.utils.data.DataLoader(trainset, batch_size=args.batch_size,
+                                               shuffle=True, num_workers=8)
+    
+    val_loader = torch.utils.data.DataLoader(valset, batch_size=args.batch_size,
+                                             shuffle=False, num_workers=8)
+    
+    test_loader = torch.utils.data.DataLoader(testset, batch_size=100, shuffle=False,
+                                             num_workers=8)
+
+    meanstd = [ [0.5, 0.5, 0.5], [0.5, 0.5, 0.5] ]
 
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 
-num_classes = 100 if args.dataset == 'CIFAR100' else 10
-num_channel = 1 if args.dataset == 'MNIST' else 3
+num_classes = 10
+num_channel = 3
 
-modifier = '' if args.lenet and args.dataset == 'MNIST' else '_wrn_'
-
+if args.dataset == 'SVHN':
+    modifier = '_cnn_'
+elif args.dataset == 'CIFAR10':
+    modifier = '_resnet32_'
 
 def load_model():
-    if args.lenet and args.dataset == 'MNIST':
-        model = LeNetMadry()
-        model.load_state_dict(torch.load(f'./pretrained_models/{args.dataset}_{args.base}.pt'))
-    else:
-        model = wrn.WideResNet(16, 4, num_classes, num_channel)
-        model.load_state_dict(torch.load(f'./pretrained_models/{args.dataset}_wrn_{args.base}.pt'))
+    if args.dataset == 'SVHN':
+        model = SmallConvNetSVHN()
+            
+        layer_mapping = {'fc1.weight': 'clf.0.weight' ,
+                         'fc1.bias': 'clf.0.bias',
+                         'fc2.weight': 'clf.3.weight',
+                         'fc2.bias': 'clf.3.bias'}
+        
+        old_sd = torch.load('trained-base-models/svhn-cnn/best.pth', map_location=device)
 
-    model.cuda()
+        new_sd = remap_sd(old_sd, layer_mapping)
+
+        model.load_state_dict(new_sd)
+        
+    elif args.dataset == 'CIFAR10':
+        model = resnet32(10)
+
+        old_sd = torch.load('trained-base-models/cifar10-resnet32/best.pth', map_location=device)
+
+        layer_mapping = {'linear1.weight': 'clf.0.weight' ,
+                         'linear1.bias': 'clf.0.bias',
+                         'linear2.weight': 'clf.2.weight',
+                         'linear2.bias': 'clf.2.bias'}
+
+        new_sd = remap_sd(old_sd, layer_mapping)
+        
+        model.load_state_dict(new_sd)
+        
+    model.to(device)
     model.eval()
-
+    
     return model
-
 
 print()
 
@@ -78,9 +188,11 @@ print()
 ## LULA TRAINING
 ####################################################################################################
 
+training_weight_decay = 1e-4
+    
 # Prior variance comes from the weight decay used in the MAP training
-var0 = torch.tensor(1/(5e-4*len(train_loader.dataset))).float().cuda()
-print(var0)
+var0 = torch.tensor(1/(training_weight_decay*len(train_loader.dataset))).float().to(device)
+print(f'var0: {var0.item():.4f}')
 
 # Grid search
 # Smooth Noise already attain maximum entropy in MNIST, so it's not useful
@@ -94,21 +206,22 @@ nll = nn.CrossEntropyLoss(reduction='mean')
 best_model = None
 best_loss = inf
 
-
 for noise in noise_grid:
     print(noise)
     print()
 
     if noise == 'imagenet':
-        ood_train_loader = dl.ImageNet32(dataset=args.dataset, train=True)
-        ood_val_loader = dl.ImageNet32(dataset=args.dataset, train=False)
+        ood_train_loader = dl.ImageNet32(dataset=args.dataset, train=True, augm_flag=False, meanstd=meanstd)
+
+        ood_val_loader = dl.ImageNet32(dataset=args.dataset, train=False, augm_flag=False, meanstd=meanstd)
+        
     elif noise == 'smooth':
         ood_train_loader = dl.Noise(args.dataset, train=True)
         ood_val_loader = dl.Noise(args.dataset, train=False)
     else:
         ood_train_loader = dl.UniformNoise(args.dataset, train=True, size=len(train_loader.dataset))
         ood_val_loader = dl.UniformNoise(args.dataset, train=False, size=2000)
-
+    
     best_model_noise = None
     best_loss_noise = inf
 
@@ -117,23 +230,21 @@ for noise in noise_grid:
         n_lula_units = [n_unit]
 
         model = load_model()
-        model_lula, time_cons = timing(lambda: lula.model.LULAModel_LastLayer(model, n_lula_units).cuda())
-        model_lula.to_gpu()
+        model_lula = lula.model.LULAModel_LastLayer(model, n_lula_units).to(device)
+        # model_lula.to_gpu()
         model_lula.eval()
         model_lula.enable_grad_mask()
 
         try:
             ood_train_loader.dataset.offset = np.random.randint(len(ood_train_loader.dataset))
-            model_lula, time_train = timing(
-                lambda: lula.train.train_last_layer(
+            model_lula = lula.train.train_last_layer(
                     model_lula, nll, val_loader, ood_train_loader, 1/var0, lr=lr,
                     n_iter=10, progressbar=True, mc_samples=10
                 )
-            )
 
-            if args.timing:
-                print(f'Time Construction: {time_cons:.3f}, Time Training: {time_train:.3f}')
-                sys.exit(0)
+            # if args.timing:
+                #print(f'Time Construction: {time_cons:.3f}, Time Training: {time_train:.3f}')
+                #sys.exit(0)
 
             # Temp
             torch.save(model_lula.state_dict(), f'{path}/{args.dataset}_lula_temp.pt')
@@ -189,13 +300,16 @@ os.remove(f'{path}/{args.dataset}_lula_temp.pt')
 model = load_model()
 
 state_dict, n_lula_units, noise = torch.load(f'{path}/{args.dataset}{modifier}lula_best.pt')
-model_lula = lula.model.LULAModel_LastLayer(model, n_lula_units).cuda()
-model_lula.to_gpu()
+model_lula = lula.model.LULAModel_LastLayer(model, n_lula_units).to(device)
+
+# model_lula.to_gpu()
+
 model_lula.load_state_dict(state_dict)
 model_lula.disable_grad_mask()
 model_lula.eval()
 
 # Test
+targets = torch.cat([y for x, y in test_loader], dim=0).numpy()
 py_in = predict(test_loader, model_lula).cpu().numpy()
 acc_in = np.mean(np.argmax(py_in, 1) == targets)*100
 mmc = np.max(py_in).mean()

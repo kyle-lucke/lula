@@ -12,13 +12,29 @@ args = parser.parse_args()
 
 
 method_types = [
-    'MAP', 'MAP-Temp', 'DE', 'DE-Temp',
-    'LA', 'LA-LULA', 'LA-OOD', 'LA-LULA-OOD', 'MAP-OE', 'LA-LULA-OE'
+    'MAP',
+    'MAP-Temp',
+    'DE',
+    'DE-Temp',
+    'LA',
+    'LA-LULA',
+    'LA-OOD',
+    'LA-LULA-OOD',
+    'MAP-OE',
+    'LA-LULA-OE'
 ]
+
 method2str = {
-    'MAP': 'MAP', 'MAP-Temp': 'MAP-Temp', 'DE': 'DE', 'DE-Temp': 'DE-Temp',
-    'LA': 'LA', 'LA-OOD': 'LLLA', 'LA-LULA': 'LA-LULA', 'LA-LULA-OOD': 'LLLA-LULA', 'MAP-OE': 'OE', 'LA-LULA-OE': 'OE-LULA'
-}
+    'MAP': 'MAP',
+    'MAP-Temp': 'MAP-Temp',
+    'DE': 'DE',
+    'DE-Temp': 'DE-Temp',
+    'LA': 'LA',
+    'LA-OOD': 'LLLA',
+    'LA-LULA': 'LA-LULA',
+    'LA-LULA-OOD': 'LLLA-LULA',
+    'MAP-OE': 'OE', '
+    LA-LULA-OE': 'OE-LULA'}
 
 datasets = ['MNIST', 'SVHN', 'CIFAR10', 'CIFAR100']
 metric2str = {'ece': 'ECE', 'acc': 'Acc.'}
@@ -27,7 +43,6 @@ path = f'./results/OOD/{args.ood_dset}/wrn'
 _, _, filenames = next(os.walk(path))
 
 TEXTBF = '\\textbf'
-
 
 def get_dfs(dset, type='ece'):
     def cond(fname, str):
