@@ -11,8 +11,12 @@ from lula.model import *
 from lula.util import *
 
 
-def train_last_layer(lula_model, nll, in_loader, out_loader, prior_prec, l2_penalty=0, lr=1e-1, n_iter=100,
-                     fisher_samples=1, alpha=1, beta=1, max_grad_norm=1000, progressbar=True, mc_samples=10):
+def train_last_layer(lula_model, nll, in_loader, out_loader, prior_prec, l2_penalty=0, lr=1e-1,
+                     n_iter=100, fisher_samples=1, alpha=1, beta=1, max_grad_norm=1000,
+                     progressbar=True, mc_samples=10):
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
     # Train only the last-layer
     for m in lula_model.modules():
         if type(m) == MaskedLinear or type(m) == MaskedConv2d:
@@ -30,7 +34,7 @@ def train_last_layer(lula_model, nll, in_loader, out_loader, prior_prec, l2_pena
         n = 0
 
         for (x_in, _), (x_out, _) in zip(in_loader, out_loader):
-            x_in, x_out = x_in.cuda(), x_out.cuda()
+            x_in, x_out = x_in.to(device), x_out.to(device)
 
             lula_model.disable_grad_mask()
 
@@ -53,8 +57,8 @@ def train_last_layer(lula_model, nll, in_loader, out_loader, prior_prec, l2_pena
 
             for s in range(mc_samples):
                 # Sample from the posterior
-                W_s = mu_W + torch.sqrt(sigma_W) * torch.randn(*mu_W.shape, device='cuda')
-                b_s = mu_b + torch.sqrt(sigma_b) * torch.randn(*mu_b.shape, device='cuda')
+                W_s = mu_W + torch.sqrt(sigma_W) * torch.randn(*mu_W.shape, device=device)
+                b_s = mu_b + torch.sqrt(sigma_b) * torch.randn(*mu_b.shape, device=device)
 
                 py_in += 1/mc_samples * torch.softmax(phi_in @ W_s.T + b_s, -1)
                 py_out += 1/mc_samples * torch.softmax(phi_out @ W_s.T + b_s, -1)

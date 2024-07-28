@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import numpy as np
 from sklearn.metrics import roc_auc_score, precision_recall_curve, auc
 from sklearn.utils import shuffle as skshuffle
-import gpytorch
+# import gpytorch
 from util import misc
 
 
