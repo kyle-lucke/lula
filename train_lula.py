@@ -2,6 +2,7 @@ from collections import OrderedDict
 
 import torch
 from torch import distributions as dist
+from torch.distributions import Categorical
 from torch import nn, optim
 import torch.nn.functional as F
 from torchvision import datasets
@@ -231,7 +232,7 @@ for noise in noise_grid:
 
         model = load_model()
         model_lula = lula.model.LULAModel_LastLayer(model, n_lula_units).to(device)
-        # model_lula.to_gpu()
+        model_lula.to_gpu()
         model_lula.eval()
         model_lula.enable_grad_mask()
 
@@ -262,8 +263,8 @@ for noise in noise_grid:
             py_in = lutil.predict(val_loader, model_kfla, n_samples=10)
             py_out = lutil.predict(ood_val_loader, model_kfla, n_samples=10, n_data=2000)
 
-            h_in = dist.Categorical(py_in).entropy().mean().cpu().numpy()
-            h_out = dist.Categorical(py_out).entropy().mean().cpu().numpy()
+            h_in = Categorical(py_in).entropy().mean().cpu().numpy()
+            h_out = Categorical(py_out).entropy().mean().cpu().numpy()
             loss = h_in - h_out
 
             print(f'Loss: {loss:.3f}, H_in: {h_in:.3f}, H_out: {h_out:.3f}')
@@ -302,7 +303,7 @@ model = load_model()
 state_dict, n_lula_units, noise = torch.load(f'{path}/{args.dataset}{modifier}lula_best.pt')
 model_lula = lula.model.LULAModel_LastLayer(model, n_lula_units).to(device)
 
-# model_lula.to_gpu()
+model_lula.to_gpu()
 
 model_lula.load_state_dict(state_dict)
 model_lula.disable_grad_mask()
