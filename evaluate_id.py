@@ -9,6 +9,9 @@ from torchvision import datasets
 import torch.utils.data as data
 import numpy as np
 from math import *
+import json
+
+from sklearn.metrics import confusion_matrix, roc_auc_score, average_precision_score, precision_recall_curve, auc
 
 # from models.models import LeNetMadry
 # from models import wrn
@@ -32,6 +35,96 @@ import lula.train
 
 from model_utils import *
 
+N_SAMPLES = 20
+
+def aupr(labels, scores):
+    precision, recall, _  = precision_recall_curve(labels, scores)
+    return auc(recall, precision)
+
+def predict_confidence(dl, model):
+
+    if N_SAMPLES < 20:
+    
+        print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
+        print('!!!!!!!!!!!!!!!!! FIXME !!!!!!!!!!!!!!!!!!!!!!')
+        print('!!!!!!!!!!!!!!!!! only using 2 samples !!!!!!!')
+        print('!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
+    
+    py, misclf_labels_correct, misclf_labels_error = lutil.predict_misclf(dl, model,
+                                                                          n_samples=N_SAMPLES,
+                                                                          return_targets=True)
+
+    py = evalutil.get_confidence(py.cpu().numpy())
+    
+    return py, misclf_labels_correct.cpu().numpy(), misclf_labels_error.cpu().numpy()
+
+# also known as recall or true positive rate (TPR)
+def sensitivity(tp, fn):
+    return tp / (tp + fn)
+
+# Also known as selectivity, or true negative rate (TNR)
+def specificity(tn, fp):
+    return tn / (tn + fp)
+
+# beta > 1 gives more weight to specificity, while beta < 1 favors
+# sensitivity. For example, beta = 2 makes specificity twice as important as
+# sensitivity, while beta = 0.5 does the opposite.
+def f_score_sens_spec(sens, spec, beta=1.0):
+
+    # return (1 + beta**2) * ( (precision * recall) / ( (beta**2 * precision) + recall ) )
+
+    return (1 + beta**2) * ( (sens * spec) / ( (beta**2 * sens) + spec ) )
+
+def threshold_scores(preds, tau):
+    if isinstance(preds, np.ndarray):
+        return np.where(preds>tau, 1.0, 0.0)
+
+    elif torch.is_tensor(preds):
+        return torch.where(preds>tau, 1.0, 0.0)
+
+    else:
+        raise TypeError(f"ERROR: preds is expected to be of type (torch.tensor, numpy.ndarray) but is type {type(preds)}")
+
+
+def determine_threshold(val_loader, model, max_threshold_step=.01):
+
+    model.eval()
+
+    model.to(device)
+
+    meta_preds, misclf_labels, _ = predict_confidence(val_loader, model)
+
+    # determine how many elements we need for a pre-determined spacing
+    # between thresholds. taken from:
+    # https://stackoverflow.com/a/70230433
+    num = round((meta_preds.max() - meta_preds.min()) / max_threshold_step) + 1 
+    thresholds = np.linspace(meta_preds.min(), meta_preds.max(), num, endpoint=True)
+
+    # compute performance over thresholds
+    threshold_to_metric = {}
+    for tau in thresholds:
+
+        predicted_labels = threshold_scores(meta_preds, tau)
+
+        tn, fp, fn, tp = confusion_matrix(misclf_labels, predicted_labels).ravel()
+        
+        specificity_value = specificity(tn, fp)
+        sensitivity_value = sensitivity(tp, fn)
+
+        f_beta_spec_sens = f_score_sens_spec(sensitivity_value,
+                                             specificity_value, beta=1.0)
+
+        print(f'tau: {tau:.6f}, spec: {specificity_value:.4f}, sens: {sensitivity_value:.4f}, f_beta: {f_beta_spec_sens:.4f}, balance: {abs(specificity_value-sensitivity_value):.4f}')
+        
+        threshold_to_metric[tau] = f_beta_spec_sens
+
+    # determine best threshold:
+    best_item = max(threshold_to_metric.items(), key=lambda x: x[1])
+
+    best_tau, best_metric = best_item
+    print(f'best | tau: {best_tau:.6f}, metric: {best_metric:.4f}', end='\n\n')
+
+    return best_item[0]
 
 def remap_sd(old_sd, layer_mapping):
     # re-map keys in state dict:
@@ -90,7 +183,8 @@ def load_lula_model(dataset, type='LULA'):
     # Additionally, load these for LULA
     if type == 'LULA':
         print('LOADING LULA')
-        lula_params = torch.load(f'./pretrained_models/kfla/{dataset}{modifier}lula_best.pt')
+        lula_params = torch.load(f'./pretrained_models/kfla/{dataset}{modifier}lula_best.pt',
+                                 map_location=device)
 
         if args.ood_dset == 'best':
             state_dict, n_units, noise = lula_params
@@ -98,7 +192,8 @@ def load_lula_model(dataset, type='LULA'):
         else:
             state_dict, n_units = lula_params
 
-        model = lula.model.LULAModel_LastLayer(base_model, n_units).cuda()
+        model = lula.model.LULAModel_LastLayer(base_model, n_units).to(device)
+        
         model.to_gpu()
         model.load_state_dict(state_dict)
         model.disable_grad_mask()
@@ -133,11 +228,13 @@ def generate_misclf_ds(base_model, dl):
     misclf_labels_error.append(misclf_labels_error_b)
     inputs.append(inps)
 
+    assert torch.all(misclf_labels_correct_b == ~misclf_labels_error_b)
+        
   # debug:
   print('acc:', torch.mean(torch.concat(misclf_labels_correct).float()))
   
   ds_out = data.TensorDataset(torch.concat(inputs),
-                          torch.concat(misclf_labels_correct).int(),
+                              torch.concat(misclf_labels_correct).int(),
                               torch.concat(misclf_labels_error).int())
   
   dl_out = data.DataLoader(ds_out, batch_size=args.batch_size, num_workers=8)
@@ -153,6 +250,7 @@ parser.add_argument('--batch_size', default=128, type=int)
 parser.add_argument('--seed', default=0, type=int)
 parser.add_argument('--ood_dset', default='best',
                     choices=['imagenet', 'uniform', 'smooth', 'best'])
+parser.add_argument('--output-dir', '-o')
 
 args = parser.parse_args()
 
@@ -161,16 +259,15 @@ args_dict = vars(args)
 for k, v in args_dict.items():
     print(f'{k}: {v}')
 print()
-    
+
+os.makedirs(args.output_dir, exist_ok=True)
+
 set_seed(args.seed)
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
-
-num_classes = 10
-num_channel = 3
 
 if args.dataset == 'CIFAR10':
     print('CIFAR10')
@@ -192,7 +289,6 @@ if args.dataset == 'CIFAR10':
 
     trainset = data.Subset(dataset, train_meta_idxs)
     valset = data.Subset(dataset_val, val_idxs)
-
     
     train_loader = torch.utils.data.DataLoader(trainset, batch_size=args.batch_size,
                                               shuffle=True, num_workers=8)
@@ -259,9 +355,45 @@ print()
 # Then use: evalutil.get_confidence(lula_preds)
 
 # determine threhsold
-# threshold = determine_threhsold(lula_model, misclf_valid_dl) 
+threshold = determine_threshold(misclf_valid_dl, lula_model) 
 
 # print(threhsold)
 
 # compute metrics:
 
+metrics_dict = dict()
+
+test_preds, misclf_labels_correct_test, misclf_labels_error_test = predict_confidence(misclf_test_dl, lula_model)
+
+predicted_labels_test = threshold_scores(test_preds, threshold)
+
+tn, fp, fn, tp = confusion_matrix(misclf_labels_correct_test,
+                                  predicted_labels_test).ravel()
+
+specificity_value = specificity(tn, fp)
+sensitivity_value = sensitivity(tp, fn)
+        
+f_beta_spec_sens = f_score_sens_spec(sensitivity_value,
+                                     specificity_value, beta=1.0)
+
+metrics_dict['specificity'] = specificity_value
+metrics_dict['sensitivity'] = sensitivity_value
+
+for beta in [1.0, 2.0]:
+
+    metrics_dict[f'f_beta_spec_sens@{beta}'] = f_score_sens_spec(sensitivity_value,
+                                                                 specificity_value, beta=beta)
+
+metrics_dict['aupr_success'] = aupr(misclf_labels_correct_test, test_preds)
+metrics_dict['aupr_error'] = aupr(misclf_labels_error_test, -test_preds)
+
+metrics_dict['ap_success'] = average_precision_score(misclf_labels_correct_test, test_preds)
+metrics_dict['ap_error'] = average_precision_score(misclf_labels_error_test, -test_preds)
+
+metrics_dict['roc_auc'] = roc_auc_score(misclf_labels_correct_test, test_preds)
+
+for k, v in metrics_dict.items():
+    print(f'{k}: {v}')
+print()
+
+json.dump(metrics_dict, open(os.path.join(args.output_dir, 'metrics.json'), 'w'))

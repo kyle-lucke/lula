@@ -13,10 +13,10 @@ cd $SLURM_SUBMIT_DIR
 source ~/miniconda3/etc/profile.d/conda.sh
 conda activate torch
 
-# for dataset in SVHN CIFAR10; do
-for dataset in SVHN; do
+for dataset in SVHN CIFAR10; do
+# for dataset in SVHN; do
 
   # LULAs
-  python evaluate_id.py --dataset $dataset --base plain > "$dataset".out
+  python evaluate_id.py --dataset $dataset --base plain -o results/"$dataset" > "$dataset".out
 	
 done
